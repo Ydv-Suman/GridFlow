@@ -1,0 +1,12 @@
+CLAUDE.md
+AGENTS.md
+.vscode/
+
+*.pdf
+data/
+*.csv
+
+
+.env
+.venv/
+__pycache__
