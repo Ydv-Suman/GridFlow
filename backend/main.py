@@ -18,7 +18,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from state import _state
-from routes import analytics, data, health, predict
+from routes import analytics, data
 
 ROOT_DIR = Path(__file__).resolve().parent.parent
 MERGED_DIR = ROOT_DIR / "data" / "merged"
@@ -98,4 +98,3 @@ def health() -> dict:
 # Register route modules
 app.include_router(data.router)
 app.include_router(analytics.router)
-app.include_router(predict.router)
