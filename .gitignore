@@ -1,12 +1,15 @@
 CLAUDE.md
 AGENTS.md
 .vscode/
+.DS_Store
 
 *.pdf
 data/
 *.csv
 
-
 .env
 .venv/
-__pycache__
+__pycache__/
+*.pkl
+output/
+exploration/output/

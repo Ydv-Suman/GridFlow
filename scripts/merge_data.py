@@ -1,263 +1,179 @@
 """
-Merge all raw EIA and NOAA CSVs into a single monthly feature table.
+Merge raw EIA and NOAA CSVs into a single monthly dataset.
 
-Output: data/merged/energy_monthly.csv
-
-Columns produced
-----------------
-year_month                  : YYYY-MM (monthly index)
-gen_total_MWh               : U.S. national total electricity generation (all fuels), thousand MWh
-gen_natural_gas_MWh         : natural gas generation, thousand MWh
-gen_coal_MWh                : all coal products, thousand MWh
-gen_nuclear_MWh             : nuclear, thousand MWh
-gen_wind_MWh                : wind, thousand MWh
-gen_solar_MWh               : estimated total solar (utility + distributed), thousand MWh
-gen_hydro_MWh               : conventional hydroelectric, thousand MWh
-gen_petroleum_MWh           : petroleum, thousand MWh
-natgas_price_usd_mcf        : U.S. national average natural-gas citygate price, $/MCF
-natgas_storage_lower48_bcf  : end-of-month Lower-48 working gas in underground storage, BCF
-wti_price_usd_bbl           : monthly average WTI crude spot price, $/BBL
-brent_price_usd_bbl         : monthly average Brent crude spot price, $/BBL
-avg_precipitation           : average monthly precipitation across 8 NOAA stations, inches
-avg_wind_speed              : average monthly wind speed across 8 NOAA stations, mph
+Reads from data/raw/ and writes data/merged/energy_monthly.csv.
+All datasets are aggregated to YYYY-MM granularity and outer-joined on
+year_month.
 
 Usage:
     python scripts/merge_data.py
     python scripts/merge_data.py --start 2020-01 --end 2024-12
 """
 
+from __future__ import annotations
+
 import argparse
 from pathlib import Path
 
 import pandas as pd
 
-RAW_DIR = Path(__file__).parent.parent / "data" / "raw"
-MERGED_DIR = Path(__file__).parent.parent / "data" / "merged"
-MERGED_DIR.mkdir(parents=True, exist_ok=True)
+ROOT_DIR = Path(__file__).resolve().parent.parent
+RAW_DIR = ROOT_DIR / "data" / "raw"
+MERGED_DIR = ROOT_DIR / "data" / "merged"
 
-# Non-overlapping fuel type IDs to extract from electricity_generation.csv
-FUEL_MAP = {
-    "ALL": "gen_total_MWh",
-    "NG":  "gen_natural_gas_MWh",
-    "COW": "gen_coal_MWh",
-    "NUC": "gen_nuclear_MWh",
-    "WND": "gen_wind_MWh",
-    "TSN": "gen_solar_MWh",
-    "HYC": "gen_hydro_MWh",
-    "PET": "gen_petroleum_MWh",
+# Key fuel types to pivot from generation data (US national)
+GENERATION_FUELS = {
+    "ALL": "gen_all_fuels_mwh",
+    "NG":  "gen_natural_gas_mwh",
+    "NUC": "gen_nuclear_mwh",
+    "COW": "gen_coal_mwh",
+    "WND": "gen_wind_mwh",
+    "TSN": "gen_solar_mwh",
+    "HYC": "gen_hydro_mwh",
+    "REN": "gen_renewables_mwh",
 }
 
+# Lower-48 total working underground storage series
+NG_STORAGE_SERIES = "NW2_EPG0_SWO_R48_BCF"
 
-def load_electricity_generation(start: str, end: str) -> pd.DataFrame:
-    """
-    Sum national generation by fuel type per month.
+# US national commercial natural gas price
+NG_PRICE_SERIES = "N3020US3"
 
-    Only 2-letter state location codes are included to avoid double-counting
-    with the numeric region aggregates (e.g. "90" = Pacific).
-    """
-    print("Processing electricity_generation.csv ...")
-    df = pd.read_csv(RAW_DIR / "electricity_generation.csv", low_memory=False)
-    df["period"] = pd.to_datetime(df["period"])
+# WTI crude oil spot price
+WTI_SERIES = "RWTC"
 
-    # Keep state-level rows only (2-letter codes)
-    df = df[df["location"].str.len() == 2]
-    # Keep only the fuel types we care about
-    df = df[df["fueltypeid"].isin(FUEL_MAP)]
-    # Apply date filter
-    df = df[(df["period"] >= start) & (df["period"] <= end)]
 
+def to_year_month(series: pd.Series) -> pd.Series:
+    """Convert a date-like series to YYYY-MM strings."""
+    return pd.to_datetime(series).dt.to_period("M").astype(str)
+
+
+def load_generation(path: Path) -> pd.DataFrame:
+    df = pd.read_csv(path)
+    df = df[df["location"] == "US"].copy()
+    df = df[df["fueltypeid"].isin(GENERATION_FUELS)].copy()
+    df["year_month"] = to_year_month(df["period"])
     df["generation"] = pd.to_numeric(df["generation"], errors="coerce")
-    df["year_month"] = df["period"].dt.to_period("M").astype(str)
 
-    # Sum across all states for each fuel type + month
-    agg = (
+    pivoted = (
         df.groupby(["year_month", "fueltypeid"])["generation"]
-        .sum()
+        .mean()
+        .unstack("fueltypeid")
+        .rename(columns=GENERATION_FUELS)
         .reset_index()
     )
-    # Pivot fuel types into columns
-    wide = agg.pivot(index="year_month", columns="fueltypeid", values="generation")
-    wide = wide.rename(columns=FUEL_MAP)
-    wide.columns.name = None
-    return wide.reset_index()
+    # Only keep columns that actually exist in the data
+    keep = ["year_month"] + [c for c in GENERATION_FUELS.values() if c in pivoted.columns]
+    return pivoted[keep]
 
 
-def load_natural_gas_prices(start: str, end: str) -> pd.DataFrame:
-    """National average natural-gas citygate price per month."""
-    print("Processing natural_gas_prices.csv ...")
-    df = pd.read_csv(RAW_DIR / "natural_gas_prices.csv", low_memory=False)
-    df["period"] = pd.to_datetime(df["period"])
-    df = df[(df["period"] >= start) & (df["period"] <= end)]
-
+def load_natural_gas_prices(path: Path) -> pd.DataFrame:
+    df = pd.read_csv(path)
+    df = df[df["series"] == NG_PRICE_SERIES].copy()
+    df["year_month"] = to_year_month(df["period"])
     df["value"] = pd.to_numeric(df["value"], errors="coerce")
-    df["year_month"] = df["period"].dt.to_period("M").astype(str)
-
-    agg = (
+    result = (
         df.groupby("year_month")["value"]
         .mean()
         .reset_index()
-        .rename(columns={"value": "natgas_price_usd_mcf"})
+        .rename(columns={"value": "natural_gas_price_mcf"})
     )
-    return agg
+    return result
 
 
-def load_natural_gas_storage(start: str, end: str) -> pd.DataFrame:
-    """
-    End-of-month Lower-48 working gas in underground storage.
-
-    Filters to duoarea == R48 and process == SWO (total working gas).
-    The last weekly reading within each calendar month is used as the
-    end-of-month snapshot.
-    """
-    print("Processing natural_gas_storage.csv ...")
-    df = pd.read_csv(RAW_DIR / "natural_gas_storage.csv", low_memory=False)
-    df["period"] = pd.to_datetime(df["period"])
-    df = df[(df["period"] >= start) & (df["period"] <= end)]
-
-    # Lower-48 total working gas only
-    df = df[(df["duoarea"] == "R48") & (df["process"] == "SWO")]
+def load_natural_gas_storage(path: Path) -> pd.DataFrame:
+    df = pd.read_csv(path)
+    df = df[df["series"] == NG_STORAGE_SERIES].copy()
+    df["year_month"] = to_year_month(df["period"])
     df["value"] = pd.to_numeric(df["value"], errors="coerce")
-    df["year_month"] = df["period"].dt.to_period("M").astype(str)
-
-    # Last reading of the month
-    agg = (
-        df.sort_values("period")
-        .groupby("year_month")["value"]
-        .last()
-        .reset_index()
-        .rename(columns={"value": "natgas_storage_lower48_bcf"})
-    )
-    return agg
-
-
-def load_petroleum_prices(start: str, end: str) -> pd.DataFrame:
-    """Monthly average WTI and Brent crude prices."""
-    print("Processing petroleum_prices.csv ...")
-    df = pd.read_csv(RAW_DIR / "petroleum_prices.csv", low_memory=False)
-    df["period"] = pd.to_datetime(df["period"])
-    df = df[(df["period"] >= start) & (df["period"] <= end)]
-
-    df["value"] = pd.to_numeric(df["value"], errors="coerce")
-    df["year_month"] = df["period"].dt.to_period("M").astype(str)
-
-    # Monthly mean per crude type
-    agg = (
-        df.groupby(["year_month", "series"])["value"]
-        .mean()
-        .reset_index()
-    )
-    wide = agg.pivot(index="year_month", columns="series", values="value")
-    wide.columns.name = None
-    wide = wide.rename(columns={"RWTC": "wti_price_usd_bbl", "RBRTE": "brent_price_usd_bbl"})
-    return wide.reset_index()
-
-
-def load_noaa_precipitation(start: str, end: str) -> pd.DataFrame:
-    """Average monthly precipitation across all NOAA stations."""
-    print("Processing noaa_monthly_precipitation.csv ...")
-    df = pd.read_csv(RAW_DIR / "noaa_monthly_precipitation.csv", low_memory=False)
-    df["date"] = pd.to_datetime(df["date"])
-    df = df[(df["date"] >= start) & (df["date"] <= end)]
-
-    df["value"] = pd.to_numeric(df["value"], errors="coerce")
-    df["year_month"] = df["date"].dt.to_period("M").astype(str)
-
-    agg = (
+    result = (
         df.groupby("year_month")["value"]
         .mean()
         .reset_index()
-        .rename(columns={"value": "avg_precipitation"})
+        .rename(columns={"value": "natural_gas_storage_bcf"})
     )
-    return agg
+    return result
 
 
-def load_noaa_wind_speed(start: str, end: str) -> pd.DataFrame:
-    """Average monthly wind speed across all NOAA stations."""
-    print("Processing noaa_wind_speed.csv ...")
-    df = pd.read_csv(RAW_DIR / "noaa_wind_speed.csv", low_memory=False)
-    df["date"] = pd.to_datetime(df["date"])
-    df = df[(df["date"] >= start) & (df["date"] <= end)]
-
+def load_petroleum_prices(path: Path) -> pd.DataFrame:
+    df = pd.read_csv(path)
+    df = df[df["series"] == WTI_SERIES].copy()
+    df["year_month"] = to_year_month(df["period"])
     df["value"] = pd.to_numeric(df["value"], errors="coerce")
-    df["year_month"] = df["date"].dt.to_period("M").astype(str)
-
-    agg = (
+    result = (
         df.groupby("year_month")["value"]
         .mean()
         .reset_index()
-        .rename(columns={"value": "avg_wind_speed"})
+        .rename(columns={"value": "wti_crude_price_bbl"})
     )
-    return agg
+    return result
 
 
-def merge(start: str, end: str) -> pd.DataFrame:
-    """Join all monthly feature tables on year_month."""
+def load_noaa(path: Path, col_name: str) -> pd.DataFrame:
+    df = pd.read_csv(path)
+    df["year_month"] = to_year_month(df["date"])
+    df["value"] = pd.to_numeric(df["value"], errors="coerce")
+    result = (
+        df.groupby("year_month")["value"]
+        .mean()
+        .reset_index()
+        .rename(columns={"value": col_name})
+    )
+    return result
+
+
+def merge_all(start: str | None, end: str | None) -> pd.DataFrame:
     frames = [
-        load_electricity_generation(start, end),
-        load_natural_gas_prices(start, end),
-        load_natural_gas_storage(start, end),
-        load_petroleum_prices(start, end),
-        load_noaa_precipitation(start, end),
-        load_noaa_wind_speed(start, end),
+        load_generation(RAW_DIR / "electricity_generation.csv"),
+        load_natural_gas_prices(RAW_DIR / "natural_gas_prices.csv"),
+        load_natural_gas_storage(RAW_DIR / "natural_gas_storage.csv"),
+        load_petroleum_prices(RAW_DIR / "petroleum_prices.csv"),
+        load_noaa(RAW_DIR / "noaa_monthly_precipitation.csv", "avg_precipitation_mm"),
+        load_noaa(RAW_DIR / "noaa_wind_speed.csv", "avg_wind_speed_ms"),
     ]
 
     merged = frames[0]
-    for df in frames[1:]:
-        merged = merged.merge(df, on="year_month", how="outer")
+    for frame in frames[1:]:
+        merged = merged.merge(frame, on="year_month", how="outer")
 
     merged = merged.sort_values("year_month").reset_index(drop=True)
 
-    # Reorder columns for readability
-    col_order = [
-        "year_month",
-        "gen_total_MWh",
-        "gen_natural_gas_MWh",
-        "gen_coal_MWh",
-        "gen_nuclear_MWh",
-        "gen_wind_MWh",
-        "gen_solar_MWh",
-        "gen_hydro_MWh",
-        "gen_petroleum_MWh",
-        "natgas_price_usd_mcf",
-        "natgas_storage_lower48_bcf",
-        "wti_price_usd_bbl",
-        "brent_price_usd_bbl",
-        "avg_precipitation",
-        "avg_wind_speed",
-    ]
-    # Keep any extra columns that were not anticipated
-    extra = [c for c in merged.columns if c not in col_order]
-    merged = merged[col_order + extra]
+    if start:
+        merged = merged[merged["year_month"] >= start]
+    if end:
+        merged = merged[merged["year_month"] <= end]
 
     return merged
 
 
-def parse_args():
-    parser = argparse.ArgumentParser(description="Merge raw energy + weather CSVs into a monthly feature table")
-    parser.add_argument("--start", default="2018-01-01", help="Start date (YYYY-MM-DD or YYYY-MM)")
-    parser.add_argument("--end",   default="2024-12-31", help="End date (YYYY-MM-DD or YYYY-MM)")
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        description="Merge EIA and NOAA raw CSVs into a monthly energy dataset."
+    )
+    parser.add_argument("--start", default=None, help="First year-month to include (YYYY-MM).")
+    parser.add_argument("--end", default=None, help="Last year-month to include (YYYY-MM).")
+    parser.add_argument(
+        "--output",
+        type=Path,
+        default=MERGED_DIR / "energy_monthly.csv",
+        help="Destination path for the merged CSV.",
+    )
     return parser.parse_args()
 
 
-def main():
+def main() -> None:
     args = parse_args()
-    # Normalise to full dates
-    start = args.start if len(args.start) == 10 else f"{args.start}-01"
-    end   = args.end   if len(args.end)   == 10 else f"{args.end}-28"
+    merged = merge_all(args.start, args.end)
 
-    print(f"Merging data from {start} to {end}\n")
-    df = merge(start, end)
+    args.output.parent.mkdir(parents=True, exist_ok=True)
+    merged.to_csv(args.output, index=False)
 
-    out = MERGED_DIR / "energy_monthly.csv"
-    df.to_csv(out, index=False)
-
-    print(f"\nMerged {len(df)} monthly rows x {len(df.columns)} columns -> {out}")
-    print(f"Date range: {df['year_month'].min()} to {df['year_month'].max()}")
-    missing = df.isnull().sum()
-    missing = missing[missing > 0]
-    if not missing.empty:
-        print("\nMissing values per column:")
-        print(missing.to_string())
+    print(f"Saved {len(merged):,} rows x {len(merged.columns)} columns -> {args.output}")
+    print(f"Coverage: {merged['year_month'].min()} to {merged['year_month'].max()}")
+    print(f"Columns: {merged.columns.tolist()}")
+    null_counts = merged.isna().sum()
+    if null_counts.any():
+        print(f"Null cells per column:\n{null_counts[null_counts > 0].to_string()}")
 
 
 if __name__ == "__main__":
