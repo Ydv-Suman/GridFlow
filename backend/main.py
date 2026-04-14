@@ -87,8 +87,15 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+@app.get("/health")
+def health() -> dict:
+    return {
+        "status": "ok",
+        "models_loaded": "regime" in _state and "forecast" in _state,
+        "dataset_rows": len(_state.get("df", [])),
+    }
+
 # Register route modules
-app.include_router(health.router)
 app.include_router(data.router)
 app.include_router(analytics.router)
 app.include_router(predict.router)
