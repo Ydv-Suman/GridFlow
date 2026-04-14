@@ -1,5 +1,6 @@
 import numpy as np
-from fastapi import APIRouter
+import pandas as pd
+from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
 
 from state import _state
@@ -43,6 +44,59 @@ class PriceForecast(BaseModel):
     predicted_price_mcf: float = Field(..., description="Predicted natural gas price ($/MCF) in 3 months")
     horizon_months: int = 3
     model_test_mae: float
+
+
+def _forecast_from_row(row: pd.Series) -> PriceForecast:
+    """Run the price forecaster on a single engineered row."""
+    bundle = _state["forecast"]
+    model = bundle["model"]
+    features: list[str] = bundle["features"]
+    metrics: dict = bundle["metrics"]
+
+    input_df = pd.DataFrame([row[features]])
+    predicted = float(model.predict(input_df)[0])
+    return PriceForecast(
+        predicted_price_mcf=round(predicted, 4),
+        horizon_months=bundle["horizon_months"],
+        model_test_mae=round(metrics.get("test_mae", float("nan")), 4),
+    )
+
+
+@router.get("/price/latest", response_model=PriceForecast)
+def predict_price_latest() -> PriceForecast:
+    """
+    Forecast natural gas price 3 months ahead using the most recent row in the
+    dataset. No inputs required — features are pulled from the loaded history.
+    """
+    engineered_df = _state.get("engineered_df")
+    if engineered_df is None:
+        raise HTTPException(
+            status_code=503,
+            detail="Engineered dataset not loaded. Run `python exploration/train_models.py` first.",
+        )
+    return _forecast_from_row(engineered_df.iloc[-1])
+
+
+@router.get("/price/{year_month}", response_model=PriceForecast)
+def predict_price_by_date(year_month: str) -> PriceForecast:
+    """
+    Forecast natural gas price 3 months ahead using features from a specific
+    historical month (format: YYYY-MM). Features are pulled from the loaded dataset.
+    """
+    engineered_df = _state.get("engineered_df")
+    if engineered_df is None:
+        raise HTTPException(
+            status_code=503,
+            detail="Engineered dataset not loaded. Run `python exploration/train_models.py` first.",
+        )
+    matches = engineered_df[engineered_df["year_month"] == year_month]
+    if matches.empty:
+        raise HTTPException(
+            status_code=404,
+            detail=f"No data found for {year_month}. Available range: "
+            f"{engineered_df['year_month'].min()} to {engineered_df['year_month'].max()}.",
+        )
+    return _forecast_from_row(matches.iloc[0])
 
 
 @router.post("/regime", response_model=RegimePrediction)

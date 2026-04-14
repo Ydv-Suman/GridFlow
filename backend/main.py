@@ -39,6 +39,7 @@ async def lifespan(app: FastAPI):
     regime_path = MODEL_DIR / "regime_classifier.pkl"
     forecast_path = MODEL_DIR / "price_forecaster.pkl"
     data_path = MERGED_DIR / "energy_monthly.csv"
+    engineered_path = MERGED_DIR / "energy_monthly_regimes.csv"
 
     if not regime_path.exists() or not forecast_path.exists():
         raise RuntimeError(
@@ -52,6 +53,8 @@ async def lifespan(app: FastAPI):
     _state["regime"] = joblib.load(regime_path)
     _state["forecast"] = joblib.load(forecast_path)
     _state["df"] = pd.read_csv(data_path)
+    if engineered_path.exists():
+        _state["engineered_df"] = pd.read_csv(engineered_path)
 
     for key in (
         "descriptive_statistics",
