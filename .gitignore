@@ -14,3 +14,6 @@ __pycache__/
 output/
 exploration/output/
 __init__.py
+
+GridFlow_submission.md
+*.docx
