@@ -125,8 +125,9 @@ export default function Dashboard() {
 
   if (error)
     return (
-      <div className="text-red-600 bg-red-50 border border-red-200 rounded-xl p-4 text-sm">
-        {error} — is the backend running?
+      <div className="rounded-xl border border-red-200 bg-red-50 p-4 text-sm text-red-700">
+        <p className="font-medium">Dashboard data is unavailable.</p>
+        <p className="mt-1">{error}</p>
       </div>
     );
 
